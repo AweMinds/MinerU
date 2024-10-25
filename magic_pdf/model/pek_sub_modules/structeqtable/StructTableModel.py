@@ -1,4 +1,5 @@
-from struct_eqtable.model import StructTable
+#from struct_eqtable.model import StructTable
+from struct_eqtable import build_model
 from pypandoc import convert_text
 class StructTableModel:
     def __init__(self, model_path, max_new_tokens=2048, max_time=400, device = 'cpu'):
@@ -7,9 +8,12 @@ class StructTableModel:
         self.max_new_tokens = max_new_tokens # maximum output tokens length
         self.max_time = max_time # timeout for processing in seconds
         if device == 'cuda':
-            self.model = StructTable(self.model_path, self.max_new_tokens, self.max_time).cuda()
+            model = build_model(self.model_path)
+            self.model = model.cuda()
+            #self.model = StructTable(self.model_path, self.max_new_tokens, self.max_time).cuda()
         else:
-            self.model = StructTable(self.model_path, self.max_new_tokens, self.max_time)
+            self.model = build_model(self.model_path)
+            #self.model = StructTable(self.model_path, self.max_new_tokens, self.max_time)
 
     def image2latex(self, image) -> str:
         table_latex = self.model.forward(image)

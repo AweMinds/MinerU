@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import os
 import shutil
@@ -5,31 +6,32 @@ import time
 import uuid
 from typing import Optional
 
-import asyncio
-
+import dotenv
 import filetype
 import requests
-from fastapi import FastAPI
-from fastapi import FastAPI, HTTPException, BackgroundTasks, File, Form, UploadFile
+from fastapi import FastAPI, HTTPException, BackgroundTasks, File, UploadFile, Form
 from fastapi.responses import FileResponse  # 添加导入以支持文件下载
-
 from loguru import logger
 
 from minerU_server import MinerUService, TaskQueue, TaskStatus
+from redis_service import RedisService
 
 loop = asyncio.get_event_loop()
 loop.set_debug(True)
 
+dotenv.load_dotenv()
+
+worker_hosts = os.environ.get("WORKER_HOSTS").strip("[]").split(",")
+start_mode = os.environ.get("START_MODE")
+redis_host = os.environ.get("REDIS_HOST")
+redis_pwd = os.environ.get("REDIS_PWD")
+output_dir = os.environ.get("OUTPUT_DIR")
+
 # 创建FastAPI应用
 app = FastAPI()
-
 service = MinerUService(gpu_id=0)  # 将在启动时初始化
-
-# # 注册启动事件
-# app.add_event_handler("startup", startup)
-
-
-# start_server(port=args.port, reload=args.reload, gpu_id=args.gpu_id)
+if start_mode == "SERVER":
+    redis = RedisService(host=redis_host, password=redis_pwd)
 REQUEST_TIMEOUT = 5
 
 
@@ -39,10 +41,21 @@ async def root():
 
 
 @app.post("/predict")
-async def predict(file: UploadFile = File(...), mode: str = 'auto', background_tasks: BackgroundTasks = None):
-    # try:
-    task_id = str(uuid.uuid4())
+async def predict(file: UploadFile = File(...), mode: Optional[str] = Form('auto'),
+                  task_id: Optional[str] = Form(None)):
+    print("---------")
+    if task_id is None:
+        task_id = str(uuid.uuid4())
 
+    filename = file.filename
+
+    if start_mode == "SERVER":
+        return await proxy_predict(filename, file, mode, task_id)
+    else:
+        return handler_predict(filename, file, mode, task_id)
+
+
+def handler_predict(filename, file, mode, task_id):
     start = time.perf_counter()
     logger.info(f"Task-{task_id} Started")
 
@@ -53,23 +66,17 @@ async def predict(file: UploadFile = File(...), mode: str = 'auto', background_t
             status_code=429,
             detail="Task queue is full. Please try again later."
         )
-
     file_bytes = file.file.read()
 
-    result = service.predict(task_id, file_bytes, mode, background_tasks)
+    result = service.predict(task_id, file_bytes, mode)
     file_read_end = time.perf_counter()
     logger.info(f"Task-{task_id} read file Finished. Elapsed time: {file_read_end - start}")
 
-    return encode_response(result)
+    return result
 
 
-@app.post("/predict_proxy")
-async def predict(file: UploadFile = File(...), mode: str = 'auto', background_tasks: BackgroundTasks = None):
-    # try:
-    task_id = str(uuid.uuid4())
-
-    start = time.perf_counter()
-    logger.info(f"Task-{task_id} Started")
+async def proxy_predict(filename, file, mode, task_id):
+    # task_id = str(uuid.uuid4())
 
     # Check if the queue is full
     if service.task_queue.queue_size >= TaskQueue.MAX_QUEUE_SIZE:
@@ -80,28 +87,54 @@ async def predict(file: UploadFile = File(...), mode: str = 'auto', background_t
         )
 
     file_bytes = file.file.read()
-
     files = {'file': file_bytes}
-    data = {'mode': mode}
-    server_url = "http://127.0.0.1:8001"
-    response = await asyncio.to_thread(requests.post, f'{server_url}/predict', files=files, data=data,
+    data = {'mode': mode, 'task_id': task_id}
+
+    if len(worker_hosts) == 0:
+        logger.error("No worker hosts detected")
+
+    logger.info(f"Task-{task_id} Started")
+    worker_host = worker_hosts[0]
+
+    redis.store_data(task_id, "status", TaskStatus.PROCESSING)
+    redis.store_data(task_id, "data", {"worker_host": worker_host, "filename": filename, "mode": mode})
+
+    response = await asyncio.to_thread(requests.post, f'{worker_host}/predict', files=files, data=data,
                                        timeout=REQUEST_TIMEOUT)
+    logger.info(f"Send predit request to worker: {worker_host}")
 
-    file_read_end = time.perf_counter()
-    logger.info(f"Task-{task_id} read file Finished. Elapsed time: {file_read_end - start}")
-    # result = {
-    #     'task_id': task_id,
-    #     'queue_position': self.task_queue.queue_size
-    # }
-
-    return {"result": "OK"}
+    return response.json()
 
 
-# except Exception as e:
-#     logger.error(f"Error in predict endpoint: {str(e)}")
-#     if isinstance(e, HTTPException):
-#         raise e
-#     raise HTTPException(status_code=500, detail=str(e))
+# @app.post("/predict_proxy")
+# async def predict(file: UploadFile = File(...), mode: str = 'auto', background_tasks: BackgroundTasks = None):
+#     # try:
+#     task_id = str(uuid.uuid4())
+#
+#     start = time.perf_counter()
+#     logger.info(f"Task-{task_id} Started")
+#
+#     # Check if the queue is full
+#     if service.task_queue.queue_size >= TaskQueue.MAX_QUEUE_SIZE:
+#         logger.error(f"Task-{task_id} Reject. Task queue is full. Please try again later.")
+#         raise HTTPException(
+#             status_code=429,
+#             detail="Task queue is full. Please try again later."
+#         )
+#
+#     file_bytes = file.file.read()
+#
+#     files = {'file': file_bytes}
+#     data = {'mode': mode}
+#     if len(worker_hosts) == 0:
+#         logger.error("No worker hosts detected")
+#
+#     worker_host = worker_hosts[0]
+#     response = await asyncio.to_thread(requests.post, f'{worker_host}/predict', files=files, data=data,
+#                                        timeout=REQUEST_TIMEOUT)
+#     logger.info(f"Send predit request to worker: {worker_host}")
+#
+#     return response.json()
 
 
 @app.get("/task/{task_id}")
@@ -112,6 +145,134 @@ async def get_task_status(task_id: str):
     except Exception as e:
         logger.error(f"Error in get_task_status endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/task/{task_id}/status")
+async def task_status_update(task_id: str, data: dict):
+    logger.info(f"Start to download Task-{task_id} files")
+
+    output_root_dir = os.path.join(output_dir, 'auto')
+    os.makedirs(output_root_dir, exist_ok=True)
+
+    task_data = redis.get_task_data(task_id)
+    worker_host = task_data.get("data", {}).get("worker_host", "")
+    if worker_host is None:
+        logger.error(f"Task-{task_id}: No worker hosts detected")
+
+    result_dir = os.path.join(output_root_dir, task_id)
+
+    # 下载结果
+    success = await download_and_save_results(
+        server_url=worker_host,
+        task_id=task_id,
+        output_dir=result_dir
+    )
+    if success:
+        redis.store_data(task_id, "result", {"result_dir": result_dir})
+        redis.store_data(task_id, "status", TaskStatus.COMPLETED)
+        logger.info(f"Task-{task_id} file download successfully. Save to {result_dir}")
+    else:
+        redis.store_data(task_id, "status", TaskStatus.FAILED)
+        logger.error(f"Task-{task_id} fail to download files.")
+
+
+async def download_and_save_results(server_url: str, task_id: str, output_dir: str, max_retries=3) -> bool:
+    """下载并存任务结果，包含重试机制"""
+    zip_path = None
+    for attempt in range(max_retries):
+        try:
+            # 创建输出目录（确保父目录存在）
+            os.makedirs(output_dir, exist_ok=True)
+
+            # 下载ZIP文件
+            download_url = f"{server_url}/download/{task_id}"
+            response = await asyncio.to_thread(
+                requests.get,
+                download_url,
+                stream=True,
+                timeout=30
+            )
+
+            if response.status_code == 404:
+                print(f"Results not ready yet for task {task_id} (attempt {attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 ** attempt)
+                continue
+
+            if response.status_code != 200:
+                print(f"Failed to download results for task {task_id}: {response.text}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 ** attempt)
+                continue
+
+            # 保存ZIP文件到临时目录
+            temp_dir = os.path.join(output_dir, 'temp')
+            os.makedirs(temp_dir, exist_ok=True)
+            zip_path = os.path.join(temp_dir, f"{task_id}.zip")
+
+            with open(zip_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+
+            await asyncio.sleep(0.5)  # 确保文件写入完成
+
+            try:
+                # 解压到临时目录
+                extract_dir = os.path.join(temp_dir, 'extract')
+                os.makedirs(extract_dir, exist_ok=True)
+                shutil.unpack_archive(zip_path, output_dir)
+
+                # 移动文件到正确的位置
+                task_dir = os.path.join(output_dir, task_id)
+                if os.path.exists(task_dir):
+                    # 移动Markdown文件
+                    md_file = os.path.join(task_dir, f"{task_id}.md")
+                    if os.path.exists(md_file):
+                        target_md_path = os.path.join(output_dir, f"{task_id}.md")
+                        if os.path.exists(target_md_path):
+                            os.remove(target_md_path)
+                        shutil.move(md_file, target_md_path)
+
+                    # 移动images目录
+                    images_dir = os.path.join(task_dir, 'images')
+                    if os.path.exists(images_dir):
+                        target_images_dir = os.path.join(output_dir, 'images')
+                        if os.path.exists(target_images_dir):
+                            shutil.rmtree(target_images_dir)
+                        shutil.move(images_dir, target_images_dir)
+
+                    # 清理临时目录
+                    shutil.rmtree(task_dir)
+
+                # 删除ZIP文件（添加重试机制）
+                max_delete_retries = 3
+                for delete_attempt in range(max_delete_retries):
+                    try:
+                        if os.path.exists(zip_path):
+                            os.remove(zip_path)
+                        break
+                    except Exception as e:
+                        if delete_attempt == max_delete_retries - 1:
+                            print(f"Failed to delete ZIP file after {max_delete_retries} attempts: {e}")
+                        else:
+                            await asyncio.sleep(1)  # 等待一秒后重试
+
+                return True  # 成功完成所有操作
+
+            except Exception as e:
+                print(f"Error extracting ZIP file: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 ** attempt)
+                continue  # 继续下一次重试
+
+        except Exception as e:
+            print(f"Error downloading results (attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt)
+            continue  # 继续下一次重试
+
+    return False  # 所有重试都失败
 
 
 def get_task_info(task_id: str):

@@ -1,34 +1,29 @@
-import concurrent
-import os
-import json
-import threading
-import time
-import uuid
-
-import aiofiles
-import torch
-import base64
-import filetype
 import asyncio
-from typing import Literal, Dict, List, Optional
-from loguru import logger
-import litserve as ls
-from fastapi import FastAPI, HTTPException, BackgroundTasks, File, Form, UploadFile
-from unittest.mock import patch
-from collections import defaultdict
-from fastapi.responses import FileResponse  # 添加导入以支持文件下载
+import base64
+import os
 import shutil  # 确保shutil已导入以处理文件删除
+import time
+from os import environ
+from typing import Dict, Optional
 
-from starlette.concurrency import run_in_threadpool
-
-from magic_pdf.pipe.UNIPipe import UNIPipe
-from magic_pdf.rw.DiskReaderWriter import DiskReaderWriter
-from magic_pdf.model.doc_analyze_by_custom_model import ModelSingleton
+import dotenv
+import filetype
+import torch
+from fastapi import HTTPException
+from loguru import logger
+import requests
 
 import magic_pdf.model as model_config
-from fastapi import BackgroundTasks
+from magic_pdf.model.doc_analyze_by_custom_model import ModelSingleton
+from magic_pdf.pipe.UNIPipe import UNIPipe
+from magic_pdf.rw.DiskReaderWriter import DiskReaderWriter
 
 model_config.__use_inside_model__ = True
+dotenv.load_dotenv()
+
+start_mode = environ.get("START_MODE")
+worker_hosts = environ.get("WORKER_HOSTS").strip("[]").split(",")
+server_host = environ.get("SERVER_HOST")
 
 
 class TaskStatus:
@@ -97,7 +92,9 @@ class MinerUService:
         # 添加一个用于保存结果文件的目录
         self.results_dir = os.path.join(self.output_base_dir, 'results')
         os.makedirs(self.results_dir, exist_ok=True)
-        self.start_server()
+        if start_mode == "WORKER":
+            self.start_server()
+        # self.start_server()
         # loop = asyncio.get_event_loop()
         # self.start_processor(loop)
 
@@ -335,7 +332,17 @@ class MinerUService:
                 'result_path': final_output_dir
             })
 
+            data = {
+                "status": self.tasks[task_id]["status"],
+                "result_path": self.tasks[task_id]["result_path"]
+            }
+
             logger.info(f"Task {task_id} completed. Results saved to {final_output_dir}")
+
+            response = await asyncio.to_thread(requests.put, f'{server_host}/task/{task_id}/status', json=data,
+                                               timeout=5)
+            # requests.post(f'{server_host}/{task_id}/status', json=task_info)
+            logger.info(f"Send Task-{task_id} status to server: {server_host}. Status: {self.tasks[task_id]['status']}")
 
         except Exception as e:
             logger.exception(f"Error processing task {task_id} on GPU {self.gpu_id}: {e}")
@@ -358,7 +365,7 @@ class MinerUService:
         # Simplified logic for single GPU
         return True
 
-    def predict(self, task_id, file_bytes, mode, background_tasks: BackgroundTasks):
+    def predict(self, task_id, file_bytes, mode):
         """将任务加入队列"""
         # pdf_bytes, mode = inputs
         # pdf_bytes = await file.read()

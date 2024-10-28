@@ -83,7 +83,7 @@ class MinerUService:
         # First assign gpu_id
         self.gpu_id = gpu_id
         # Then use it to set environment variable
-        os.environ['CUDA_VISIBLE_DEVICES'] = str(self.gpu_id)
+        # os.environ['CUDA_VISIBLE_DEVICES'] = str(self.gpu_id)
 
         # Rest of initialization
         self.output_base_dir = output_base_dir

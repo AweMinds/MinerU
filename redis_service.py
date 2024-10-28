@@ -1,8 +1,14 @@
+import dotenv
 import redis
 import json
 import os
 from typing import Any, Dict, Optional
 from datetime import datetime
+
+dotenv.load_dotenv()
+
+redis_host = os.environ.get("REDIS_HOST")
+redis_pwd = os.environ.get("REDIS_PWD")
 
 
 class RedisService:
@@ -256,6 +262,9 @@ class RedisService:
                 'failed': 0,
                 'total': 0
             }
+
+
+redis = RedisService(host=redis_host, password=redis_pwd)
 
 
 # 使用示例

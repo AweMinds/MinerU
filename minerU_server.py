@@ -19,11 +19,15 @@ from magic_pdf.pipe.UNIPipe import UNIPipe
 from magic_pdf.rw.DiskReaderWriter import DiskReaderWriter
 
 model_config.__use_inside_model__ = True
+
+from redis_service import redis
+
 dotenv.load_dotenv()
 
 start_mode = environ.get("START_MODE")
 worker_hosts = environ.get("WORKER_HOSTS").strip("[]").split(",")
 server_host = environ.get("SERVER_HOST")
+host_name = os.environ.get("HOST_NAME")
 
 
 class TaskStatus:
@@ -263,6 +267,7 @@ class MinerUService:
         await self.decode_request(file_bytes, mode)
         # self.task_queue.pending_tasks[task_id] = {'created_at': self.tasks[task_id]['created_at']}
         logger.info(f"Assigning task {task_id} to GPU {self.gpu_id}")
+        redis.store_data(host_name, "workload", 1)
 
         temp_output_dir = os.path.join(self.output_base_dir, 'temp', task_id)
         final_output_dir = os.path.join(self.results_dir, task_id)
@@ -338,6 +343,7 @@ class MinerUService:
             }
 
             logger.info(f"Task {task_id} completed. Results saved to {final_output_dir}")
+            redis.store_data(host_name, "workload", 0)
 
             response = await asyncio.to_thread(requests.put, f'{server_host}/task/{task_id}/status', json=data,
                                                timeout=5)

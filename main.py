@@ -14,25 +14,32 @@ from fastapi.responses import FileResponse  # 添加导入以支持文件下载
 from loguru import logger
 
 from minerU_server import MinerUService, TaskQueue, TaskStatus
-from redis_service import RedisService
+from redis_service import redis
 
 loop = asyncio.get_event_loop()
 loop.set_debug(True)
-
+start_worker_index = 0
 dotenv.load_dotenv()
 
 worker_hosts = os.environ.get("WORKER_HOSTS").strip("[]").split(",")
 start_mode = os.environ.get("START_MODE")
-redis_host = os.environ.get("REDIS_HOST")
-redis_pwd = os.environ.get("REDIS_PWD")
 output_dir = os.environ.get("OUTPUT_DIR")
+gpu_id = os.environ.get("GPU_ID")
+host_name = os.environ.get("HOST_NAME")
 
 # 创建FastAPI应用
 app = FastAPI()
-service = MinerUService(gpu_id=0)  # 将在启动时初始化
-if start_mode == "SERVER":
-    redis = RedisService(host=redis_host, password=redis_pwd)
+service = MinerUService(gpu_id=int(gpu_id))  # 将在启动时初始化
 REQUEST_TIMEOUT = 5
+
+
+def init_worker_status():
+    if start_mode == "WORKER":
+        redis.store_data(host_name, "workload", 0)
+
+
+if start_mode == "SERVER":
+    init_worker_status()
 
 
 @app.get("/app_status")
@@ -94,7 +101,13 @@ async def proxy_predict(filename, file, mode, task_id):
         logger.error("No worker hosts detected")
 
     logger.info(f"Task-{task_id} Started")
-    worker_host = worker_hosts[0]
+    worker_host = get_available_worker()
+    if worker_host is None:
+        logger.error(f"Task-{task_id} Reject. Task queue is full. Please try again later.")
+        raise HTTPException(
+            status_code=429,
+            detail="Task queue is full. Please try again later."
+        )
 
     redis.store_data(task_id, "status", TaskStatus.PROCESSING)
     redis.store_data(task_id, "data", {"worker_host": worker_host, "filename": filename, "mode": mode})
@@ -104,6 +117,25 @@ async def proxy_predict(filename, file, mode, task_id):
     logger.info(f"Send predit request to worker: {worker_host}")
 
     return response.json()
+
+
+@app.get("/workers")
+def get_available_worker():
+    global start_worker_index
+    host_size = len(worker_hosts)
+
+    for index in range(host_size):
+        worker_index = (index + start_worker_index) % host_size
+        worker_host = worker_hosts[worker_index]
+        worker_data = redis.get_task_data(worker_host)
+        if worker_data is None:
+            continue
+
+        if worker_data.get("workload") == 0:
+            start_worker_index = (worker_index + 1) % host_size
+            return worker_host
+
+    return None
 
 
 # @app.post("/predict_proxy")

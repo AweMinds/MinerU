@@ -11,6 +11,7 @@ scikit-learn>=1.0.2
 wordninja>=2.0.0
 struct-eqtable==0.3.0
 
+aiofiles
 filetype
 litserve
 fastapi

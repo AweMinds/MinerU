@@ -8,6 +8,7 @@ from typing import Optional
 import asyncio
 
 import filetype
+import requests
 from fastapi import FastAPI
 from fastapi import FastAPI, HTTPException, BackgroundTasks, File, Form, UploadFile
 from fastapi.responses import FileResponse  # 添加导入以支持文件下载
@@ -16,28 +17,20 @@ from loguru import logger
 
 from minerU_server import MinerUService, TaskQueue, TaskStatus
 
+loop = asyncio.get_event_loop()
+loop.set_debug(True)
+
 # 创建FastAPI应用
 app = FastAPI()
 
 service = MinerUService(gpu_id=0)  # 将在启动时初始化
-
-
-def startup():
-    try:
-        loop = asyncio.get_event_loop()
-        service.start_processor(loop)  # 移除 'await' 以避免阻塞
-        logger.info("Task processor started successfully")
-        # logger.info(f"Server is ready to accept connections at http://0.0.0.0:{port}")
-    except Exception as e:
-        logger.error(f"Failed to start task processor: {e}")
-        raise
-
 
 # # 注册启动事件
 # app.add_event_handler("startup", startup)
 
 
 # start_server(port=args.port, reload=args.reload, gpu_id=args.gpu_id)
+REQUEST_TIMEOUT = 5
 
 
 @app.get("/app_status")
@@ -46,7 +39,7 @@ async def root():
 
 
 @app.post("/predict")
-async def predict(file: UploadFile = File(...), mode: str = 'auto'):
+async def predict(file: UploadFile = File(...), mode: str = 'auto', background_tasks: BackgroundTasks = None):
     # try:
     task_id = str(uuid.uuid4())
 
@@ -61,13 +54,47 @@ async def predict(file: UploadFile = File(...), mode: str = 'auto'):
             detail="Task queue is full. Please try again later."
         )
 
-    request = await decode_request(file, mode)
+    file_bytes = file.file.read()
+
+    result = service.predict(task_id, file_bytes, mode, background_tasks)
     file_read_end = time.perf_counter()
     logger.info(f"Task-{task_id} read file Finished. Elapsed time: {file_read_end - start}")
 
-    result = service.predict(task_id, request)
-
     return encode_response(result)
+
+
+@app.post("/predict_proxy")
+async def predict(file: UploadFile = File(...), mode: str = 'auto', background_tasks: BackgroundTasks = None):
+    # try:
+    task_id = str(uuid.uuid4())
+
+    start = time.perf_counter()
+    logger.info(f"Task-{task_id} Started")
+
+    # Check if the queue is full
+    if service.task_queue.queue_size >= TaskQueue.MAX_QUEUE_SIZE:
+        logger.error(f"Task-{task_id} Reject. Task queue is full. Please try again later.")
+        raise HTTPException(
+            status_code=429,
+            detail="Task queue is full. Please try again later."
+        )
+
+    file_bytes = file.file.read()
+
+    files = {'file': file_bytes}
+    data = {'mode': mode}
+    server_url = "http://127.0.0.1:8001"
+    response = await asyncio.to_thread(requests.post, f'{server_url}/predict', files=files, data=data,
+                                       timeout=REQUEST_TIMEOUT)
+
+    file_read_end = time.perf_counter()
+    logger.info(f"Task-{task_id} read file Finished. Elapsed time: {file_read_end - start}")
+    # result = {
+    #     'task_id': task_id,
+    #     'queue_position': self.task_queue.queue_size
+    # }
+
+    return {"result": "OK"}
 
 
 # except Exception as e:
@@ -222,10 +249,10 @@ async def download_results(task_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-async def decode_request(file, mode):
+def decode_request(file, mode):
     """Decode incoming request"""
     # 读取文件内容为二进制
-    pdf_file = await file.read()
+    pdf_file = file.read()
 
     # 验证模式
     if mode not in ['ocr', 'txt', 'auto']:

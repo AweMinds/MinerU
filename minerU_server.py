@@ -1,5 +1,8 @@
+import concurrent
 import os
 import json
+import threading
+import time
 import uuid
 
 import aiofiles
@@ -16,11 +19,14 @@ from collections import defaultdict
 from fastapi.responses import FileResponse  # 添加导入以支持文件下载
 import shutil  # 确保shutil已导入以处理文件删除
 
+from starlette.concurrency import run_in_threadpool
+
 from magic_pdf.pipe.UNIPipe import UNIPipe
 from magic_pdf.rw.DiskReaderWriter import DiskReaderWriter
 from magic_pdf.model.doc_analyze_by_custom_model import ModelSingleton
 
 import magic_pdf.model as model_config
+from fastapi import BackgroundTasks
 
 model_config.__use_inside_model__ = True
 
@@ -221,43 +227,44 @@ class MinerUService:
                 torch.cuda.ipc_collect()
         gc.collect()
 
-    # def decode_request(self, request):
-    #     """Decode incoming request"""
-    #     try:
-    #         # 读取文件内容为二进制
-    #         pdf_file = request['file'].file.read()
-    #         mode = request.get('mode', 'auto')
-    #
-    #         # 验证模式
-    #         if mode not in ['ocr', 'txt', 'auto']:
-    #             raise HTTPException(
-    #                 status_code=400,
-    #                 detail=f"Invalid mode: {mode}. Use 'ocr', 'txt' or 'auto'"
-    #             )
-    #
-    #         # 验证文件类型
-    #         mime_type = filetype.guess_mime(pdf_file)
-    #         if not mime_type:
-    #             raise HTTPException(
-    #                 status_code=400,
-    #                 detail="Could not determine file type"
-    #             )
-    #         if mime_type != 'application/pdf':
-    #             raise HTTPException(
-    #                 status_code=400,
-    #                 detail=f"Invalid file type: {mime_type}. Only PDF files are supported"
-    #             )
-    #
-    #         return pdf_file, mode
-    #     except HTTPException:
-    #         raise
-    #     except Exception as e:
-    #         logger.error(f"Error decoding request: {str(e)}")
-    #         raise HTTPException(status_code=400, detail=str(e))
+    async def decode_request(self, file_bytes, mode):
+        """Decode incoming request"""
+        try:
+            # 读取文件内容为二进制
+            # pdf_file = await file.read()
+            # mode = request.get('mode', 'auto')
 
-    def process_pdf_task(self, pdf_bytes, mode, task_id):
+            # 验证模式
+            if mode not in ['ocr', 'txt', 'auto']:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid mode: {mode}. Use 'ocr', 'txt' or 'auto'"
+                )
+
+            # 验证文件类型
+            mime_type = filetype.guess_mime(file_bytes)
+            if not mime_type:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Could not determine file type"
+                )
+            if mime_type != 'application/pdf':
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid file type: {mime_type}. Only PDF files are supported"
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error decoding request: {str(e)}")
+            raise HTTPException(status_code=400, detail=str(e))
+
+    async def process_pdf_task(self, file_bytes, mode, task_id):
         """异步处理PDF任务"""
         # Log the task assignment for debugging
+        await self.task_queue.add_task(task_id, {'created_at': self.tasks[task_id]['created_at']})
+        await self.decode_request(file_bytes, mode)
+        # self.task_queue.pending_tasks[task_id] = {'created_at': self.tasks[task_id]['created_at']}
         logger.info(f"Assigning task {task_id} to GPU {self.gpu_id}")
 
         temp_output_dir = os.path.join(self.output_base_dir, 'temp', task_id)
@@ -283,7 +290,7 @@ class MinerUService:
             image_dir = 'images'
             image_writer = DiskReaderWriter(local_image_dir)
 
-            pipe = UNIPipe(pdf_bytes, jso_useful_key, image_writer)
+            pipe = UNIPipe(file_bytes, jso_useful_key, image_writer)
             pipe.pipe_classify()
 
             if model_config.__use_inside_model__:
@@ -351,26 +358,25 @@ class MinerUService:
         # Simplified logic for single GPU
         return True
 
-    def predict(self, task_id, inputs):
+    def predict(self, task_id, file_bytes, mode, background_tasks: BackgroundTasks):
         """将任务加入队列"""
-        pdf_bytes, mode = inputs
+        # pdf_bytes, mode = inputs
+        # pdf_bytes = await file.read()
         # task_id = str(uuid.uuid4())
 
         # 初始化任务状态
         self.tasks[task_id] = {
             'status': TaskStatus.PENDING,
-            'created_at': asyncio.get_event_loop().time(),
-            'pdf_bytes': pdf_bytes,
+            'created_at': time.time(),
+            'pdf_bytes': "",
             'mode': mode
         }
-
-        # 将任务加入队列
-        asyncio.create_task(self.task_queue.add_task(task_id, {
-            'created_at': self.tasks[task_id]['created_at']
-        }))
-
+        #
+        # # 将任务加入队列
         loop = asyncio.get_event_loop()
-        loop.run_in_executor(None, self.task_processor)
+        loop.set_debug(True)
+        loop.create_task(self.process_pdf_task(file_bytes, mode, task_id))
+        print("----------create_task------------------")
 
         return {
             'task_id': task_id,

@@ -38,8 +38,7 @@ def init_worker_status():
         redis.store_data(host_name, "workload", 0)
 
 
-if start_mode == "SERVER":
-    init_worker_status()
+init_worker_status()
 
 
 @app.get("/app_status")
@@ -66,13 +65,6 @@ def handler_predict(filename, file, mode, task_id):
     start = time.perf_counter()
     logger.info(f"Task-{task_id} Started")
 
-    # Check if the queue is full
-    if service.task_queue.queue_size >= TaskQueue.MAX_QUEUE_SIZE:
-        logger.error(f"Task-{task_id} Reject. Task queue is full. Please try again later.")
-        raise HTTPException(
-            status_code=429,
-            detail="Task queue is full. Please try again later."
-        )
     file_bytes = file.file.read()
 
     result = service.predict(task_id, file_bytes, mode)
@@ -84,14 +76,6 @@ def handler_predict(filename, file, mode, task_id):
 
 async def proxy_predict(filename, file, mode, task_id):
     # task_id = str(uuid.uuid4())
-
-    # Check if the queue is full
-    if service.task_queue.queue_size >= TaskQueue.MAX_QUEUE_SIZE:
-        logger.error(f"Task-{task_id} Reject. Task queue is full. Please try again later.")
-        raise HTTPException(
-            status_code=429,
-            detail="Task queue is full. Please try again later."
-        )
 
     file_bytes = file.file.read()
     files = {'file': file_bytes}

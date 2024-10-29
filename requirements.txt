@@ -20,5 +20,7 @@ opencv-python
 torchtext
 Pillow
 redis
+python-dotenv
+uvicorn
 
 # The requirements.txt must ensure that only necessary external dependencies are introduced. If there are new dependencies to add, please contact the project administrator.

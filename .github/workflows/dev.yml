@@ -1,0 +1,62 @@
+# This workflow will build a Java project with Maven, and cache/restore any dependencies to improve the workflow execution time
+# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-java-with-maven
+
+# This workflow uses actions that are not certified by GitHub.
+# They are provided by a third-party and are governed by
+# separate terms of service, privacy policy, and support
+# documentation.
+
+name: Dev CI
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+env:
+  REGISTRY: registry.cn-shanghai.aliyuncs.com
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build_and_publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+    - name: Check out the repo
+      uses: actions/checkout@v3
+    - run: |
+        echo 本次构建的版本为：${{ github.ref_name }}
+        echo 账号：${{ secrets.ACR_USERNAME }}
+        env
+
+    - name: Login to Aliyun ACR
+      uses: docker/login-action@v2
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ secrets.ACR_USERNAME }}
+        password: ${{ secrets.ACR_PASSWORD }}
+
+    - name: Extract metadata (tags, labels) for Docker
+      id: meta
+      uses: docker/metadata-action@v4.4.0
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+    - name: Get current date
+      id: date
+      run: echo "::set-output name=today::$(date +'%Y-%m-%d')"
+
+    - name: Docker Build and push
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        push: true
+#        tags: ${{ steps.meta.outputs.tags }}
+        tags: |
+            registry.cn-shanghai.aliyuncs.com/aweminds/llm-agent:latest
+            registry.cn-shanghai.aliyuncs.com/aweminds/llm-agent:${{ steps.date.outputs.today }}
+        labels: ${{ steps.meta.outputs.labels }}

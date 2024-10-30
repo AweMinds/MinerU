@@ -9,11 +9,11 @@ from typing import Optional
 import dotenv
 import filetype
 import requests
-from fastapi import FastAPI, HTTPException, BackgroundTasks, File, UploadFile, Form
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.responses import FileResponse  # 添加导入以支持文件下载
 from loguru import logger
 
-from minerU_server import MinerUService, TaskQueue, TaskStatus
+from minerU_server import MinerUService, TaskStatus
 from redis_service import redis
 
 loop = asyncio.get_event_loop()
@@ -49,36 +49,45 @@ async def root():
 @app.post("/predict")
 async def predict(file: UploadFile = File(...), mode: Optional[str] = Form('auto'),
                   task_id: Optional[str] = Form(None)):
-    print("---------")
-    if task_id is None:
-        task_id = str(uuid.uuid4())
-
-    filename = file.filename
+    # Construct request object
+    request = {
+        'file': file,
+        'mode': mode,
+        'task_id': task_id,
+    }
 
     if start_mode == "SERVER":
-        return await proxy_predict(filename, file, mode, task_id)
+        return await proxy_predict(decode_request(request))
     else:
-        return handler_predict(filename, file, mode, task_id)
+        return await handler_predict(decode_request(request))
 
 
-def handler_predict(filename, file, mode, task_id):
+async def handler_predict(inputs):
     start = time.perf_counter()
+    task_id, filename, pdf_bytes, mode = inputs
+
     logger.info(f"Task-{task_id} Started")
 
-    file_bytes = file.file.read()
+    # result = service.predict(task_id, pdf_bytes, mode)
+    thread = asyncio.to_thread(service.predict, task_id, pdf_bytes, mode)
+    create_task = asyncio.create_task(thread)
 
-    result = service.predict(task_id, file_bytes, mode)
+    print("-------result--------------")
+    # print(response)
     file_read_end = time.perf_counter()
     logger.info(f"Task-{task_id} read file Finished. Elapsed time: {file_read_end - start}")
 
-    return result
+    return {
+        'task_id': task_id,
+        'queue_size': service.task_queue.queue.qsize()
+    }
 
 
-async def proxy_predict(filename, file, mode, task_id):
+async def proxy_predict(inputs):
     # task_id = str(uuid.uuid4())
+    task_id, filename, pdf_bytes, mode = inputs
 
-    file_bytes = file.file.read()
-    files = {'file': file_bytes}
+    files = {'file': pdf_bytes}
     data = {'mode': mode, 'task_id': task_id}
 
     if len(worker_hosts) == 0:
@@ -96,11 +105,23 @@ async def proxy_predict(filename, file, mode, task_id):
     redis.store_data(task_id, "status", TaskStatus.PROCESSING)
     redis.store_data(task_id, "data", {"worker_host": worker_host, "filename": filename, "mode": mode})
 
-    response = await asyncio.to_thread(requests.post, f'{worker_host}/predict', files=files, data=data,
-                                       timeout=REQUEST_TIMEOUT)
-    logger.info(f"Send predit request to worker: {worker_host}")
-
-    return response.json()
+    try:
+        response = await asyncio.to_thread(requests.post, f'{worker_host}/predict', files=files, data=data,
+                                           timeout=REQUEST_TIMEOUT)
+        logger.info(f"Send predit request to worker: {worker_host}")
+        return response.json()
+    except ConnectionError as ex:
+        logger.error(f"Fail to connect to {worker_host}: {ex}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Fail to connect to {worker_host}: {ex}"
+        )
+    except Exception as e:
+        logger.error(f"Fail send request to {worker_host}: {e}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Fail send request to {worker_host}: {e}"
+        )
 
 
 @app.get("/workers")
@@ -426,10 +447,16 @@ async def download_results(task_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def decode_request(file, mode):
+def decode_request(request):
     """Decode incoming request"""
     # 读取文件内容为二进制
-    pdf_file = file.read()
+    pdf_file = request['file'].file.read()
+    filename = request['file'].filename
+    mode = request.get('mode', 'auto')
+    task_id = request['task_id']
+
+    if task_id is None or task_id == '':
+        task_id = str(uuid.uuid4())
 
     # 验证模式
     if mode not in ['ocr', 'txt', 'auto']:
@@ -450,7 +477,7 @@ def decode_request(file, mode):
             status_code=400,
             detail=f"Invalid file type: {mime_type}. Only PDF files are supported"
         )
-    return pdf_file, mode
+    return task_id, filename, pdf_file, mode
 
 
 def encode_response(response):

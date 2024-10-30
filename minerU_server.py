@@ -260,11 +260,11 @@ class MinerUService:
             logger.error(f"Error decoding request: {str(e)}")
             raise HTTPException(status_code=400, detail=str(e))
 
-    async def process_pdf_task(self, file_bytes, mode, task_id):
+    def process_pdf_task(self, file_bytes, mode, task_id):
         """异步处理PDF任务"""
         # Log the task assignment for debugging
-        await self.task_queue.add_task(task_id, {'created_at': self.tasks[task_id]['created_at']})
-        await self.decode_request(file_bytes, mode)
+        # self.task_queue.add_task(task_id, {'created_at': self.tasks[task_id]['created_at']})
+        # await self.decode_request(file_bytes, mode)
         # self.task_queue.pending_tasks[task_id] = {'created_at': self.tasks[task_id]['created_at']}
         logger.info(f"Assigning task {task_id} to GPU {self.gpu_id}")
         redis.store_data(host_name, "workload", 1)
@@ -345,9 +345,11 @@ class MinerUService:
             logger.info(f"Task {task_id} completed. Results saved to {final_output_dir}")
             redis.store_data(host_name, "workload", 0)
 
-            response = await asyncio.to_thread(requests.put, f'{server_host}/task/{task_id}/status', json=data,
-                                               timeout=5)
+            # thread = asyncio.to_thread(requests.put, f'{server_host}/task/{task_id}/status', json=data,
+            #                            timeout=5)
+            # task = asyncio.create_task(thread)
             # requests.post(f'{server_host}/{task_id}/status', json=task_info)
+            requests.put(f'{server_host}/task/{task_id}/status', json=data, timeout=5)
             logger.info(f"Send Task-{task_id} status to server: {server_host}. Status: {self.tasks[task_id]['status']}")
 
         except Exception as e:
@@ -372,6 +374,7 @@ class MinerUService:
         return True
 
     def predict(self, task_id, file_bytes, mode):
+        print("----------worker predict------------------")
         """将任务加入队列"""
         # pdf_bytes, mode = inputs
         # pdf_bytes = await file.read()
@@ -386,14 +389,16 @@ class MinerUService:
         }
         #
         # # 将任务加入队列
-        loop = asyncio.get_event_loop()
-        loop.set_debug(True)
-        loop.create_task(self.process_pdf_task(file_bytes, mode, task_id))
+        # loop = asyncio.get_event_loop()
+        # loop.set_debug(True)
+        # loop.create_task(self.process_pdf_task(file_bytes, mode, task_id))
+        # response = await asyncio.to_thread(self.process_pdf_task, file_bytes, mode, task_id)
+        self.process_pdf_task(file_bytes, mode, task_id)
         print("----------create_task------------------")
 
         return {
             'task_id': task_id,
-            'queue_position': self.task_queue.queue_size
+            'queue_size': self.task_queue.queue.qsize()
         }
 
     # def get_task_info(self, task_id: str):
